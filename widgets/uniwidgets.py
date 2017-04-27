@@ -8,6 +8,8 @@ widgets and wrappers.
 """
 
 import time
+import sys
+import webbrowser
 from collections import OrderedDict, Container, deque
 
 import unicurses as uni
@@ -70,6 +72,23 @@ def write(scrid, text, ypos, xpos, color="white"):
     uni.doupdate()
 
 
+# =============================================================================
+# WIDGETS & OBJECTS
+
+class Click(object):
+    """Mouse click object."""
+    def __init__(self):
+        self.id, self.x, self.y, self.z, self.bstate = uni.getmouse()
+        self.is_clicked = False
+        if self.bstate & uni.BUTTON1_PRESSED:
+            self.is_clicked = True
+        self.debug = "Click: {0}, {1}, {2}".format(self.x, self.y, self.z)
+
+    @property
+    def coords(self):  # TODO: are these coords correct?
+        return (self.x, self.y)
+
+
 class Widget(object):
     """Base class for unicurses widgets."""
     def __init__(self, window):
@@ -79,6 +98,7 @@ class Widget(object):
         self.win = None
         self.height = 0
         self.width = 0
+        self.label_indent = 2
 
     def show(self, render_fn=None):
         """Show the widget."""
@@ -99,14 +119,13 @@ class Widget(object):
         if not hasattr(self, "label"):
             raise AttributeError("Widget has no attribute 'label'")
         if (len(self.label) + 2) >= self.width:
-            #pass
             raise SizeError("Label is longer than box.")
-        #if self.label_color_pair > 0:
-        #uni.wattron(self.boxwin, color_schemes["cyan"])
-        uni.mvwaddstr(self.win, 0, 2, self.label)
-        #if self.label_color_pair > 0:
+        # TODO: label styles
+        # if self.label_color_pair > 0:
+        # uni.wattron(self.boxwin, uni.COLOR_PAIR(self.label_color_pair))
+        uni.mvwaddstr(self.win, 0, self.label_indent, self.label)
+        # if self.label_color_pair > 0:
         #    uni.wattroff(self.boxwin, uni.COLOR_PAIR(self.label_color_pair))
-                # Add methods if attributes exist
 
 
 class Window(object):
@@ -154,6 +173,7 @@ class Window(object):
             uni.refresh()
             time.sleep(wait)
         uni.endwin()
+        sys.exit(0)
 
     def add_widget(self, name, widget):
         """Add widget object to window's drawing order."""
@@ -176,7 +196,8 @@ class Window(object):
 
 
 class Box(Widget):
-    def __init__(self, window, xpos, ypos, height, width, label="", outline=True, label_color_pair=0):
+    def __init__(self, window, xpos, ypos, height, width, label="",
+                 outline=True, label_color_pair=0):
         super(Box, self).__init__(window)
         self.label = label
         self.label_color_pair = label_color_pair
@@ -203,7 +224,7 @@ class Box(Widget):
         # Write contents in order
         for line in self.content:
             ix = self.content.index(line) + 2
-            uni.mvwaddstr(self.win, ix, 2, line[0])
+            uni.mvwaddstr(self.win, ix, 2, line)
 
         # Only create panel attribute on display
         self.panel = uni.new_panel(self.win)
@@ -212,26 +233,74 @@ class Box(Widget):
         self.content.append(text)
 
     def fit_to_content(self):
-        max_content = max([len(c[0]) for c in self.content])
+        max_content = max([len(c) for c in self.content])
         label_len = len(self.label)
         self.width = max([max_content, label_len]) + 4
         self.height = len(self.content) + 4
 
 
-class _MenuSection(object):
-    def __init__(self, parent, name, contents):
-        self.parent_menu = parent
+class _SubmenuOption(object):
+    def __init__(self, name, action, args=()):
         self.name = name
-        self.contents = contents
+        self.action = action
+        self.args = args
+
+
+class _Submenu(object):
+    def __init__(self, name, options):
+        self.name = name
+        self.options = options
+        # {"Exit": (win.destroy, "Later dude")}
+        # 'e': {"action": options[0], "args": options[1]}
+
+        # Calculated by Menubar
+        self.xpos = 0
+
         # Set initial key
-        self.key = self.name[0]
-        # Set bounding box of section
-        # TODO: x, y
-        self.bounds = (range(0, 0), 0)
+        self.key = self.name[0].lower()
+
+        # Actions dict (e.g. self.actions[e] -> win.destroy ("Exit"))
+        self.actions = {}
+        #self.option_keys = {}
+        for option in self.options:
+            ix = 0
+            f_letter = ord(option[ix].lower())
+            while f_letter in self.actions.keys():#self.option_keys.keys():
+                ix += 1
+                f_letter = ord(option[ix].lower())
+            # Default action and args
+            action = None
+            args = ()
+            # Handle single function/method or None
+            pot_action = self.options[option]
+            if pot_action is None:
+                pass
+            elif pot_action is not None and hasattr(pot_action, "__call__"):
+                action = pot_action
+            elif len(pot_action) > 1 and hasattr(pot_action[0], "__call__"):
+                action = pot_action[0]
+                if pot_action[1]:
+                    args = pot_action[1]
+            self.actions[f_letter] = {"action": action,
+                                      "args": args}
 
     @property
-    def ix(self):
-        return self.parent_menu.sections.index(self.name)  # TODO: menubar.sections must be list
+    def bounds(self):
+        """Bounding box of the object for click-target."""
+        return (range(self.xpos, len(self.name)), 1)
+
+    def action(self, key):
+        """Execute an option's action."""
+        action = self.actions[key]["action"]
+        args = self.actions[key]["args"]
+        # Handle None
+        if not hasattr(action, "__call__"):
+            return
+        if args:
+            action(args)
+            return
+        action()
+        return
 
 
 class Menubar(Widget):
@@ -242,14 +311,15 @@ class Menubar(Widget):
         self.label_color_pair = label_color_pair
         self.height = 3
         self.width = self._parent.maxx
-        self.sections = OrderedDict()  # TODO: make list, make sections objects
+        #self.sections = OrderedDict()
+        self.submenus = []
         self.selection = None
         # Start window at (0, 0); span 3 down and entire width over
         self.win = uni.newwin(self.height, self.width, 0, 0)
 
     def render(self):
         """Show the menubar."""
-        self.make_panels()
+        #self.make_panels()
         # Box line
         uni.box(self.win, 0, 0)
         # Label
@@ -259,55 +329,58 @@ class Menubar(Widget):
         self.panel = uni.new_panel(self.win)
         uni.panel_above(self.panel)
 
-        # Sections
-        for section in self.sections:
-            uni.mvwaddstr(self.win, 1, self.section_ix[section], section)
+        # Print submenu names
+        self.update_section_atts()
+        self.make_panels()
+        for submenu in self.submenus:
+            uni.mvwaddstr(self.win, 1, submenu.xpos, submenu.name)
+            # TODO: highlight selected submenu/options
 
-    @property
-    def section_ix(self):
+    def update_section_atts(self):
         """Calculates spacing between sections."""
-        ixs = {}
-        if self.sections:
-            spaces = 2
-            for k in self.sections.keys():
-                ixs[k] = spaces
-                spaces += len(k) + 2
-        return ixs
+        if self.submenus:
+            xpos = 2
+            for submenu in self.submenus:
+                submenu.xpos = xpos
+                xpos += len(submenu.name) + 2
 
     @property
     def menukeys(self):
-        """Key for each menubar section."""
-        return {ord(k.lower()[0]): self.panels[k] for k
-                in self.sections.keys()}
+        """Key for each menubar submenu."""
+        return {ord(submenu.key): submenu for submenu in self.submenus}
 
     def make_panels(self):
-        """Dict of submenus by section name."""
-        panels = {}
-        for section in self.sections:
-            box = Box(self._parent, self.section_ix[section]-1, 1,
-                      20, 20, "<{}>".format(section))
-            for opt in self.sections[section]:
-                box.add_content(opt)
+        """Dict of submenus by submenu name."""
+        for submenu in self.submenus:
+            box = Box(self._parent, submenu.xpos, 2, 20, 20)
+            box.label_indent = 1
+            for option in submenu.options:
+                box.add_content(option)
             box.fit_to_content()
-            panels[section] = box
-        self.panels = panels
+            submenu.panel = box
 
-    def add_section(self, name, contents=[]):
-        """Add header/section to menubar (e.g. File, Edit, etc.)."""
-        if isinstance(contents, Container) and not isinstance(contents, str):
-            self.sections[name] = contents
+    def add_submenu(self, name, options):
+        """Add submenu to menubar (e.g. File, Edit, etc.)."""
+        new_submenu = _Submenu(name, options)
+        self.submenus.append(new_submenu)
 
     def show_submenu(self, key):
-        self.selection = self.menukeys[key]
+        self.open_submenu = self.menukeys[key]
+        self.selection = self.open_submenu.panel
         self.selection.show()
-        uni.panel_above(self.selection.panel)
         uni.update_panels()
+
         # Listen for keypress with submenu open
         while True:
             c = uni.wgetch(self.win)
             if c in QUIT_KEYS:
                 self.reset()
                 break
+            elif c in self.open_submenu.actions: # option_keys
+                uni.mvaddstr(win.maxy, 0,
+                             "DEBUG: Character pressed: {0}".format(c))
+                uni.refresh()
+                self.open_submenu.action(c)
 
     def reset(self):
         if self.selection:
@@ -329,7 +402,6 @@ class Textbox(Box):  # TODO: deque and scroll modes / subclasses
 
         # Text content, ordered by list index
         self.all_lines = []
-        #self.lines = deque([], self.height - 2)
 
         # Size rules
         self.min_height = 3
@@ -354,18 +426,12 @@ class Textbox(Box):  # TODO: deque and scroll modes / subclasses
     @property
     def max_line_len(self):
         return max([len(line) for line in self.all_lines])
-    '''
-    def is_last_line(self, line_no):
-        if self.ypad + line_no == self.height - 1:
-            return True
-        return False
-    '''
+
     def add_line(self, text, line=None):
         if line is None:
-            #self.lines.append(text)
             self.all_lines.append(text)
         else:
-            self.all_lines.insert(line, text)#self.lines.insert(line, text)
+            self.all_lines.insert(line, text)
 
     def render(self, line=None):  # Overwrites existing
         if self.max_line_len > self.width:
@@ -397,35 +463,32 @@ class Textbox(Box):  # TODO: deque and scroll modes / subclasses
             uni.wrefresh(self.win)
 
 
-class Click(object):
-    """Mouse click object."""
-    def __init__(self):
-        self.id, self.x, self.y, self.z, self.bstate = uni.getmouse()
-        self.is_clicked = False
-        if self.bstate & uni.BUTTON1_PRESSED:
-            self.is_clicked = True
-        self.debug = "Click: {0}, {1}, {2}".format(self.x, self.y, self.z)
-
-    @property
-    def coords(self):  # TODO: are these coords correct?
-        return (self.x, self.y)
-
-
 if __name__ == "__main__":
     try:
         win = Window()
 
         # Create menubar
         menu = Menubar(win)
-        menu.add_section("File", [["New", 1], ["Open", 2],
-                                  ["Recent", 3], ["Exit", 4]])
-        menu.add_section("Edit", [["Remove", None]])
-        menu.add_section("Options", [["Preferences", None]])
-        menu.add_section("Help", [["About", "Garin"], ["Website", "www..."]])
+        #menu.add_section("File", [["New", 1], ["Open", 2],
+        #                          ["Recent", 3], ["Exit", 4]])
+        #menu.add_section("Edit", [["Remove", None]])
+        #menu.add_section("Options", [["Preferences", None]])
+        #menu.add_section("Help", [["About", "Garin"], ["Website", "www..."]])
+        menu.add_submenu("File", {"New": None,
+                                  "Open": None,
+                                  "Nonsense": None,
+                                  "Exit": win.destroy})
+        menu.add_submenu("Edit", {"Undo": None,
+                                  "Redo": None,
+                                  "Reduce": None})
+        menu.add_submenu("Options", {"Preferences": None})
+        menu.add_submenu("Help", {"About": None,
+                                  "Web": (webbrowser.open, "https://github.com/WindfallLabs/unicurse_widgets")})
+
         # Add menubar to window's drawing order
         win.add_widget("menu", menu)
 
-        textbox = Textbox(win, 0, win.maxy-5, 5, win.maxx/2, label="<Clicks>")
+        textbox = Textbox(win, 0, 3, 5, win.maxx/2, label="<Clicks>")
         # TODO: raise drawing error when win.maxy, 3
         textbox.add_line("Start")
         textbox.add_line("clicking")
@@ -458,10 +521,9 @@ if __name__ == "__main__":
                     uni.mvaddstr(win.maxy, 0, "DEBUG: {0}".format(click.debug))
 
             if c != 539:
-                uni.mvaddstr(win.maxy, 0, "DEBUG: Character pressed: {0}".format(c))
+                uni.mvaddstr(win.maxy, 0,
+                             "DEBUG: Character pressed: {0}".format(c))
             uni.refresh()
-
-
 
     except Exception as e:
         raw_input(e)
