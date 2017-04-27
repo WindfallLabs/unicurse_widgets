@@ -8,9 +8,17 @@ widgets and wrappers.
 """
 
 import time
-from collections import OrderedDict, Container
+from collections import OrderedDict, Container, deque
 
 import unicurses as uni
+
+
+__all__ = ["SizeError", "Window", "Widget", "Menubar", "Box", "Textbox"]
+
+
+# Errors
+class SizeError(Exception):
+    pass
 
 
 # Dict of colors
@@ -69,6 +77,8 @@ class Widget(object):
         self._parent = window
         # Widget window
         self.win = None
+        self.height = 0
+        self.width = 0
 
     def show(self, render_fn=None):
         """Show the widget."""
@@ -83,6 +93,20 @@ class Widget(object):
         """Hide the widget."""
         uni.hide_panel(self.panel)
         uni.update_panels()
+
+    def draw_label(self):
+        """Draws widget label."""
+        if not hasattr(self, "label"):
+            raise AttributeError("Widget has no attribute 'label'")
+        if (len(self.label) + 2) >= self.width:
+            #pass
+            raise SizeError("Label is longer than box.")
+        #if self.label_color_pair > 0:
+        #uni.wattron(self.boxwin, color_schemes["cyan"])
+        uni.mvwaddstr(self.win, 0, 2, self.label)
+        #if self.label_color_pair > 0:
+        #    uni.wattroff(self.boxwin, uni.COLOR_PAIR(self.label_color_pair))
+                # Add methods if attributes exist
 
 
 class Window(object):
@@ -100,12 +124,16 @@ class Window(object):
         uni.keypad(self.stdscr, True)
         # Enable colors
         uni.start_color()
+        # Enable mouse
+        uni.mouseinterval(0)
+        uni.mousemask(uni.ALL_MOUSE_EVENTS)
         # Window dimensions
-        self.maxy, self.maxx = uni.getmaxyx(self.stdscr)
+        y, x = uni.getmaxyx(self.stdscr)
+        # Make maxx/maxy the last row/col visible
+        self.maxy = y - 1
+        self.maxx = x - 1
         # Drawing order of contained widgets
         self.widgets = []
-        # Track keypresses
-        #self.keypress = -1
 
     def get_drawing_order(self):
         """Displays the child widgets and index in drawing order."""
@@ -167,13 +195,7 @@ class Box(Widget):
             uni.box(self.win, 0, 0)
 
         # Label
-        if (len(self.label) + 2) > self.width:
-            raise AttributeError("Label is longer than box.")
-        #if self.label_color_pair > 0:
-        #uni.wattron(self.boxwin, color_schemes["cyan"])
-        uni.mvwaddstr(self.win, 0, 2, self.label)
-        #if self.label_color_pair > 0:
-        #    uni.wattroff(self.boxwin, uni.COLOR_PAIR(self.label_color_pair))
+        self.draw_label()
 
         # Box fill
         # TODO: color fill
@@ -216,13 +238,14 @@ class Menubar(Widget):
     """Horizontal menubar (File, Edit, Help, etc)."""
     def __init__(self, window, label="", label_color_pair=0):
         super(Menubar, self).__init__(window)
-        self._parent = window
         self.label = label
         self.label_color_pair = label_color_pair
+        self.height = 3
+        self.width = self._parent.maxx
         self.sections = OrderedDict()  # TODO: make list, make sections objects
         self.selection = None
         # Start window at (0, 0); span 3 down and entire width over
-        self.win = uni.newwin(3, self._parent.maxx, 0, 0)
+        self.win = uni.newwin(self.height, self.width, 0, 0)
 
     def render(self):
         """Show the menubar."""
@@ -230,11 +253,8 @@ class Menubar(Widget):
         # Box line
         uni.box(self.win, 0, 0)
         # Label
-        if self.label_color_pair > 0:
-            uni.wattron(self.win, uni.COLOR_PAIR(self.label_color_pair))
-        uni.mvwaddstr(self.win, 0, 2, self.label)
-        if self.label_color_pair > 0:
-            uni.wattroff(self.win, uni.COLOR_PAIR(self.label_color_pair))
+        self.draw_label()
+
         uni.doupdate()
         self.panel = uni.new_panel(self.win)
         uni.panel_above(self.panel)
@@ -257,7 +277,8 @@ class Menubar(Widget):
     @property
     def menukeys(self):
         """Key for each menubar section."""
-        return {ord(k.lower()[0]): self.panels[k] for k in self.sections.keys()}
+        return {ord(k.lower()[0]): self.panels[k] for k
+                in self.sections.keys()}
 
     def make_panels(self):
         """Dict of submenus by section name."""
@@ -295,50 +316,95 @@ class Menubar(Widget):
         uni.refresh()
 
 
-class Textbox(Box):
-    def __init__(self, window, xpos, ypos, height, width, label="", outline=True, label_color_pair=0):
+class Textbox(Box):  # TODO: deque and scroll modes / subclasses
+    def __init__(self, window, xpos, ypos, height, width, label="",
+                 outline=True, xpad=0, ypad=0, label_color_pair=0):
         super(Textbox, self).__init__(
             window, xpos, ypos, height, width, label=label,
             outline=outline, label_color_pair=label_color_pair)
-        # Inside margins
-        #self.ymargin = ypos + 1
-        #self.xmargin = xpos + 1
-        self.indent = 2
-        #self.current_line = self.ymargin + 1
-        self.lines = []
 
+        # Padding (i.e. spaces between text and border (+1))
+        self.ypad = ypad + 1
+        self.xpad = xpad + 1
+
+        # Text content, ordered by list index
+        self.all_lines = []
+        #self.lines = deque([], self.height - 2)
+
+        # Size rules
+        self.min_height = 3
+        # Textbox can only have a max height of the parent window's height
+        win_max_y = self._parent.maxy - 3
+        if self.height > win_max_y:
+            self.height = win_max_y
+        # Textbox can only have a max width of the parent window's width
+        win_max_x = self._parent.maxx
+        if self.width > win_max_x:
+            self.width = win_max_x
+        # Textbox must be at least 3 tall
+        if self.height < self.min_height:
+            self.height = 3
+        # TODO: xpos and ypos limits
+        # Errors are raised if textbox is smaller than content or label
+
+    @property
+    def lines(self):
+        return deque(self.all_lines, self.height - 2)
+
+    @property
+    def max_line_len(self):
+        return max([len(line) for line in self.all_lines])
+    '''
+    def is_last_line(self, line_no):
+        if self.ypad + line_no == self.height - 1:
+            return True
+        return False
+    '''
     def add_line(self, text, line=None):
         if line is None:
-            self.lines.append(text)
+            #self.lines.append(text)
+            self.all_lines.append(text)
         else:
-            self.lines.insert(line, text)
+            self.all_lines.insert(line, text)#self.lines.insert(line, text)
 
     def render(self, line=None):  # Overwrites existing
+        if self.max_line_len > self.width:
+            raise SizeError("Content is longer than box.")
         # New window
         self.win = uni.newwin(self.height, self.width, self.ypos, self.xpos)
+
         # Draw outline
         if self.outline:
             uni.box(self.win, 0, 0)
         # Draw label
-        if self.label:
-            uni.mvwaddstr(self.win, 0, 2, self.label)
+        self.draw_label()
+
         # Make panel
         self.panel = uni.new_panel(self.win)
 
+        # Track the line number currently written
+        self.current_line = 0
+
         # Print content
         for line in self.lines:
-            uni.mvwaddstr(self.win, self.lines.index(line) + 2,
-                          self.indent, line)
-        uni.refresh()
+            # Print line text on line number
+            ix = list(self.lines).index(line)
+            line_no = ix + self.ypad
+            # Print lines according to the text's index in the list
+            uni.mvwaddstr(self.win, line_no, self.xpad, " "*(self.width-2))
+            uni.mvwaddstr(self.win, line_no, self.xpad, line)
+            self.current_line += 1
+            uni.wrefresh(self.win)
 
 
 class Click(object):
     """Mouse click object."""
-    def __init__(self, debug=False):
+    def __init__(self):
         self.id, self.x, self.y, self.z, self.bstate = uni.getmouse()
         self.is_clicked = False
         if self.bstate & uni.BUTTON1_PRESSED:
             self.is_clicked = True
+        self.debug = "Click: {0}, {1}, {2}".format(self.x, self.y, self.z)
 
     @property
     def coords(self):  # TODO: are these coords correct?
@@ -348,8 +414,7 @@ class Click(object):
 if __name__ == "__main__":
     try:
         win = Window()
-        uni.mouseinterval(0)
-        uni.mousemask(uni.ALL_MOUSE_EVENTS)
+
         # Create menubar
         menu = Menubar(win)
         menu.add_section("File", [["New", 1], ["Open", 2],
@@ -358,14 +423,13 @@ if __name__ == "__main__":
         menu.add_section("Options", [["Preferences", None]])
         menu.add_section("Help", [["About", "Garin"], ["Website", "www..."]])
         # Add menubar to window's drawing order
-
-        # TODO: set H & W where
-        textbox = Textbox(win, 0, 3, 0, 0, label="<Messages>")
-        textbox.add_line("Garin")
-        textbox.add_line("is")
-        textbox.add_line("Awesome!")
-        win.add_widget("textbox", textbox)
         win.add_widget("menu", menu)
+
+        textbox = Textbox(win, 0, win.maxy-5, 5, win.maxx/2, label="<Clicks>")
+        # TODO: raise drawing error when win.maxy, 3
+        textbox.add_line("Start")
+        textbox.add_line("clicking")
+        win.add_widget("textbox", textbox)
 
         # Main loop
         while True:
@@ -388,12 +452,13 @@ if __name__ == "__main__":
                 menu.show_submenu(c)
 
             if c == uni.KEY_MOUSE:
-                click = Click(True)
+                click = Click()
                 if click.is_clicked:
                     textbox.add_line(str(click.coords))
+                    uni.mvaddstr(win.maxy, 0, "DEBUG: {0}".format(click.debug))
 
-
-            uni.mvaddstr(23, 0, "DEBUG: Character pressed: {0}".format(c))
+            if c != 539:
+                uni.mvaddstr(win.maxy, 0, "DEBUG: Character pressed: {0}".format(c))
             uni.refresh()
 
 
