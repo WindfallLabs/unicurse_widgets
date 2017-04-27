@@ -65,13 +65,18 @@ def write(scrid, text, ypos, xpos, color="white"):
 class Widget(object):
     """Base class for unicurses widgets."""
     def __init__(self, window):
+        # Parent window
         self._parent = window
+        # Widget window
+        self.win = None
 
     def show(self, render_fn=None):
         """Show the widget."""
+        # Call render() method if exists
         if hasattr(self, "render"):
             self.render()
-        uni.show_panel(self.panel)
+        if hasattr(self, "panel"):
+            uni.show_panel(self.panel)
         uni.update_panels()
 
     def hide(self):
@@ -157,16 +162,16 @@ class Box(Widget):
     def render(self):
         """Renders but does not show the widget."""
         # Draw the box line
-        self.boxwin = uni.newwin(self.height, self.width, self.ypos, self.xpos)
+        self.win = uni.newwin(self.height, self.width, self.ypos, self.xpos)
         if self.outline:
-            uni.box(self.boxwin, 0, 0)
+            uni.box(self.win, 0, 0)
 
         # Label
         if (len(self.label) + 2) > self.width:
             raise AttributeError("Label is longer than box.")
         #if self.label_color_pair > 0:
         #uni.wattron(self.boxwin, color_schemes["cyan"])
-        uni.mvwaddstr(self.boxwin, 0, 2, self.label)
+        uni.mvwaddstr(self.win, 0, 2, self.label)
         #if self.label_color_pair > 0:
         #    uni.wattroff(self.boxwin, uni.COLOR_PAIR(self.label_color_pair))
 
@@ -176,10 +181,10 @@ class Box(Widget):
         # Write contents in order
         for line in self.content:
             ix = self.content.index(line) + 2
-            uni.mvwaddstr(self.boxwin, ix, 2, line[0])
+            uni.mvwaddstr(self.win, ix, 2, line[0])
 
         # Only create panel attribute on display
-        self.panel = uni.new_panel(self.boxwin)
+        self.panel = uni.new_panel(self.win)
 
     def add_content(self, text):
         self.content.append(text)
@@ -191,6 +196,22 @@ class Box(Widget):
         self.height = len(self.content) + 4
 
 
+class _MenuSection(object):
+    def __init__(self, parent, name, contents):
+        self.parent_menu = parent
+        self.name = name
+        self.contents = contents
+        # Set initial key
+        self.key = self.name[0]
+        # Set bounding box of section
+        # TODO: x, y
+        self.bounds = (range(0, 0), 0)
+
+    @property
+    def ix(self):
+        return self.parent_menu.sections.index(self.name)  # TODO: menubar.sections must be list
+
+
 class Menubar(Widget):
     """Horizontal menubar (File, Edit, Help, etc)."""
     def __init__(self, window, label="", label_color_pair=0):
@@ -198,28 +219,29 @@ class Menubar(Widget):
         self._parent = window
         self.label = label
         self.label_color_pair = label_color_pair
-        self.sections = OrderedDict()
+        self.sections = OrderedDict()  # TODO: make list, make sections objects
         self.selection = None
-        self.menuwin = uni.newwin(3, self._parent.maxx, 0, 0)
+        # Start window at (0, 0); span 3 down and entire width over
+        self.win = uni.newwin(3, self._parent.maxx, 0, 0)
 
     def render(self):
         """Show the menubar."""
         self.make_panels()
         # Box line
-        uni.box(self.menuwin, 0, 0)
+        uni.box(self.win, 0, 0)
         # Label
         if self.label_color_pair > 0:
-            uni.wattron(self.menuwin, uni.COLOR_PAIR(self.label_color_pair))
-        uni.mvwaddstr(self.menuwin, 0, 2, self.label)
+            uni.wattron(self.win, uni.COLOR_PAIR(self.label_color_pair))
+        uni.mvwaddstr(self.win, 0, 2, self.label)
         if self.label_color_pair > 0:
-            uni.wattroff(self.menuwin, uni.COLOR_PAIR(self.label_color_pair))
+            uni.wattroff(self.win, uni.COLOR_PAIR(self.label_color_pair))
         uni.doupdate()
-        self.panel = uni.new_panel(self.menuwin)
+        self.panel = uni.new_panel(self.win)
         uni.panel_above(self.panel)
 
         # Sections
         for section in self.sections:
-            uni.mvwaddstr(self.menuwin, 1, self.section_ix[section], section)
+            uni.mvwaddstr(self.win, 1, self.section_ix[section], section)
 
     @property
     def section_ix(self):
@@ -261,7 +283,7 @@ class Menubar(Widget):
         uni.update_panels()
         # Listen for keypress with submenu open
         while True:
-            c = uni.wgetch(self.menuwin)
+            c = uni.wgetch(self.win)
             if c in QUIT_KEYS:
                 self.reset()
                 break
@@ -310,12 +332,26 @@ class Textbox(Box):
         uni.refresh()
 
 
+class Click(object):
+    """Mouse click object."""
+    def __init__(self, debug=False):
+        self.id, self.x, self.y, self.z, self.bstate = uni.getmouse()
+        self.is_clicked = False
+        if self.bstate & uni.BUTTON1_PRESSED:
+            self.is_clicked = True
+
+    @property
+    def coords(self):  # TODO: are these coords correct?
+        return (self.x, self.y)
+
 
 if __name__ == "__main__":
     try:
         win = Window()
+        uni.mouseinterval(0)
+        uni.mousemask(uni.ALL_MOUSE_EVENTS)
         # Create menubar
-        menu = Menubar(win)#, "<Label>")
+        menu = Menubar(win)
         menu.add_section("File", [["New", 1], ["Open", 2],
                                   ["Recent", 3], ["Exit", 4]])
         menu.add_section("Edit", [["Remove", None]])
@@ -336,7 +372,6 @@ if __name__ == "__main__":
             # Draw window and child widgets
             win.draw()
 
-
             # Get keys
             c = uni.getch()
 
@@ -352,10 +387,13 @@ if __name__ == "__main__":
                 # Show submenu by keypress
                 menu.show_submenu(c)
 
-                # Debug note
-                #uni.mvaddstr(20, 0, "{} in dict".format(c))
+            if c == uni.KEY_MOUSE:
+                click = Click(True)
+                if click.is_clicked:
+                    textbox.add_line(str(click.coords))
 
-            #uni.mvaddstr(22, 0, "DEBUG: Character pressed: {0}".format(c))
+
+            uni.mvaddstr(23, 0, "DEBUG: Character pressed: {0}".format(c))
             uni.refresh()
 
 
