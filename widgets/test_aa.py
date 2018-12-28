@@ -25,7 +25,7 @@ driver = "{ODBC Driver 13 for SQL Server}"
 
 # Dictionary of database: server
 databases = {
-    "ACCELA": "CPDBPROD",
+    "ACCELA": "",
     "Test": None
     }
 
